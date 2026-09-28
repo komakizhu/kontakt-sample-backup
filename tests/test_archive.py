@@ -49,6 +49,11 @@ class ArchiveTests(unittest.TestCase):
         self.command("run", "--plan", self.plan)
         manifest = json.loads((self.destination / "sample_archive_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(len(manifest["entries"]), 2)
+        guide = (self.destination / "AGENT_采样库恢复指南.md").read_text(encoding="utf-8")
+        self.assertIn("Straight/Piano", guide)
+        self.assertIn("Layered/Strings/Violin", guide)
+        self.assertIn("UTC+08:00", guide)
+        self.assertTrue((self.destination / "restore_sample_libraries.py").is_file())
         for versions in manifest["entries"].values():
             package = self.destination / versions[0]["package_relpath"]
             self.assertTrue((package / "backup.zip").is_file())
@@ -63,7 +68,11 @@ class ArchiveTests(unittest.TestCase):
         self.make_plan()
         planned = json.loads(self.plan.read_text(encoding="utf-8"))
         self.assertEqual(planned["counts"]["skip"], 2)
+        (self.destination / "AGENT_采样库恢复指南.md").unlink()
+        (self.destination / "restore_sample_libraries.py").unlink()
         self.command("run", "--plan", self.plan)
+        self.assertTrue((self.destination / "AGENT_采样库恢复指南.md").is_file())
+        self.assertTrue((self.destination / "restore_sample_libraries.py").is_file())
         (self.source / "Straight" / "Piano" / "new.wav").write_bytes(b"changed")
         self.make_plan()
         planned = json.loads(self.plan.read_text(encoding="utf-8"))
@@ -72,6 +81,58 @@ class ArchiveTests(unittest.TestCase):
         self.command("run", "--plan", self.plan)
         manifest = json.loads((self.destination / "sample_archive_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(len(manifest["entries"]["Straight/Piano"]), 2)
+        downloaded = self.root / "UpdatedBackup"
+        shutil.copytree(self.destination, downloaded)
+        portable = downloaded / "restore_sample_libraries.py"
+        restored = self.root / "UpdatedComputerB" / "Kontakt"
+        result = subprocess.run([sys.executable, str(portable), "restore", "--target-root", str(restored),
+                                 "--only", "Straight/Piano"], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((restored / "Straight" / "Piano" / "new.wav").read_bytes(), b"changed")
+
+    def test_downloaded_backup_restores_without_skill_or_original_source(self):
+        self.make_plan()
+        self.command("run", "--plan", self.plan)
+        downloaded = self.root / "DownloadedBackup"
+        shutil.copytree(self.destination, downloaded)
+        shutil.rmtree(self.source)
+        portable = downloaded / "restore_sample_libraries.py"
+        listing = subprocess.run([sys.executable, str(portable), "list"],
+                                 text=True, capture_output=True)
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertEqual(len(json.loads(listing.stdout)["libraries"]), 2)
+        restored = self.root / "ComputerB" / "Kontakt"
+        result = subprocess.run([sys.executable, str(portable), "restore", "--target-root", str(restored)],
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((restored / "Straight" / "Piano" / "sample.wav").read_bytes(), b"sample" * 100)
+        self.assertEqual((restored / "Layered" / "Strings" / "Violin" / "note.nki").read_bytes(), b"note" * 100)
+        again = subprocess.run([sys.executable, str(portable), "restore", "--target-root", str(restored)],
+                               text=True, capture_output=True)
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("refusing overwrite", again.stderr)
+
+    def test_portable_restore_rejects_missing_part_and_unsafe_manifest_path(self):
+        self.make_plan()
+        self.command("run", "--plan", self.plan)
+        downloaded = self.root / "DownloadedBackup"
+        shutil.copytree(self.destination, downloaded)
+        portable = downloaded / "restore_sample_libraries.py"
+        manifest_file = downloaded / "sample_archive_manifest.json"
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        entry = manifest["entries"]["Straight/Piano"][0]
+        (downloaded / entry["package_relpath"] / entry["zip_entry"]).unlink()
+        target = self.root / "ComputerB" / "Kontakt"
+        result = subprocess.run([sys.executable, str(portable), "restore", "--target-root", str(target),
+                                 "--only", "Straight/Piano"], text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing ZIP part", result.stderr)
+        self.assertFalse((target / "Straight" / "Piano").exists())
+        manifest["entries"]["../escape"] = manifest["entries"].pop("Straight/Piano")
+        manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+        result = subprocess.run([sys.executable, str(portable), "list"], text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unsafe manifest path", result.stderr)
 
     def test_plan_change_and_stage_resume(self):
         self.make_plan()
@@ -141,6 +202,15 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(planned["counts"]["skip"], 2)
         self.command("run", "--plan", self.plan)
         self.assertFalse((self.destination / "packages").exists())
+        self.assertTrue((self.destination / "AGENT_采样库恢复指南.md").is_file())
+        downloaded = self.root / "LegacyDownloaded"
+        shutil.copytree(self.destination, downloaded)
+        portable = downloaded / "restore_sample_libraries.py"
+        restored = self.root / "LegacyComputerB" / "Kontakt"
+        result = subprocess.run([sys.executable, str(portable), "restore", "--target-root", str(restored),
+                                 "--only", "Straight/Piano"], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((restored / "Straight" / "Piano" / "sample.wav").read_bytes(), b"sample" * 100)
 
     def test_legacy_import_does_not_adopt_changed_source(self):
         old_folder = self.destination / "01_Straight"
